@@ -15,7 +15,15 @@ setup_env()
 from cloakbrowser import launch_persistent_context
 
 results = {}
-ctx = launch_persistent_context(PROFILE, headless=True, humanize=True)
+try:
+    ctx = launch_persistent_context(PROFILE, headless=True, humanize=True)
+except Exception as e:
+    if "ProcessSingleton" in str(e) or "already in use" in str(e):
+        print("❌ profile 被 serve 占用（SingletonLock）。\n"
+              "   请改用: bash scripts/browser-serve.sh check（自动停 serve → 巡检 → 重启）")
+    else:
+        print(f"❌ 启动失败: {type(e).__name__} {str(e)[:120]}")
+    sys.exit(1)
 page = ctx.pages[0] if ctx.pages else ctx.new_page()
 n = restore_cookies(ctx)
 print(f"cookie 恢复: {n} 条")

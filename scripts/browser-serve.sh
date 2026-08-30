@@ -116,7 +116,12 @@ case "${1:-status}" in
     fi
     ;;
   check)
-    exec python3 "$HERE/cloak_check.py"
+    # 巡检需独占 profile（SingletonLock）→ 自动 停 serve → 巡检 → 恢复原状态
+    was_running=false
+    if alive; then was_running=true; echo "（serve 运行中，先停后查，查完自动重启）"; "$0" stop >/dev/null 2>&1; sleep 1; fi
+    python3 "$HERE/cloak_check.py"; rc=$?
+    if $was_running; then "$0" start >/dev/null 2>&1 && echo "（serve 已恢复运行）"; fi
+    exit $rc
     ;;
   *)
     echo "用法: $0 {start|stop|restart|status|check}"
