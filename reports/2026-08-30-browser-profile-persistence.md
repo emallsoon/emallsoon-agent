@@ -51,6 +51,17 @@
 ### 4.3 加固后完整重启
 `stop → start`：自动选 151 → 启动成功 → Cookies DB 自检 141 个 → 无需恢复 → Bing 登录态保留。
 
+### 4.4 真实容器重置（意外发生，实测通过）
+任务间隙环境发生真实重置（`/data/user/work` 被清空、系统库 `/usr/lib` 缺失）：
+
+1. 151/131 Chrome 均报 `libatk-1.0.so.0: cannot open shared object file`（系统库丢失）。
+2. `apt-get install libatk1.0-0 libatk-bridge2.0-0 libcups2 libgbm1 ...` 重装依赖。
+3. `browser-serve.sh start` → 自动选 151 → **启动成功，Cookies DB 140 个 cookie 完好**（自动兜底未触发，因 DB 完好）。
+4. **Bing Webmaster 登录态完整保留**：直达 `bing.com/webmasters` Home 控制台；bing.com 首页显示账号 "ren jie"。
+5. Google 仍被服务端风控拦截（reCAPTCHA Enterprise，checkbox 点击后 `checked=false`）→ 需等待冷却后重跑 `scripts/gsc_login.py`（TOTP 自动生成）。
+
+> 教训：临时工作区 `/data/user/work` 会被重置清空 → 登录/驱动脚本已迁入仓库 `scripts/`（`cdp_page.py`、`gsc_login.py`），可跨重置使用。
+
 ## 5. 自动恢复机制（browser-serve.sh）
 
 1. **Chrome 多级回退**：`linux-151 → linux-131 → /opt/google/chrome/chrome`。
@@ -72,10 +83,10 @@ python3 scripts/cdp_cookies.py backup --port 9223
 python3 scripts/cdp_cookies.py restore --port 9223 --file /workspace/.browser-auth/latest.json
 ```
 
-登录脚本（凭据在 `/workspace/.browser-auth/credentials.env`，模式 600，不入库）：
+登录脚本（凭据在 `/workspace/.browser-auth/credentials.env`，模式 600，不入库；脚本已在仓库 `scripts/`，跨重置可用）：
 
-- GSC：`python3 /data/user/work/gsc_login.py`（邮箱→密码→TOTP；若遇 reCAPTCHA 风控，等待冷却后重跑）
-- Bing：`python3 /data/user/work/bing_login.py`（MS 账号，"Use your password" 绕过邮箱验证码；BWT 控制台点 Sign In → 账户卡片）
+- GSC：`python3 scripts/gsc_login.py`（邮箱→密码→TOTP；若遇 reCAPTCHA 风控，等待冷却后重跑）
+- Bing：`python3 scripts/bing_login.py`（MS 账号，"Use your password" 绕过邮箱验证码；BWT 控制台点 Sign In → 账户卡片）
 
 ## 7. 结论与边界
 
