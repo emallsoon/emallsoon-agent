@@ -10,7 +10,17 @@
 # ============================================================
 set -uo pipefail
 
-REPO="/workspace/emallsoon"
+# 仓库路径自动探测：生产目录优先，镜像克隆（emallsoon-agent）回退
+if [ -d /workspace/emallsoon/.git ]; then
+  REPO="/workspace/emallsoon"
+  CLONE_URL="https://github.com/emallsoon/emallsoon.git"
+elif [ -d /workspace/emallsoon-agent/.git ]; then
+  REPO="/workspace/emallsoon-agent"
+  CLONE_URL="https://github.com/emallsoon/emallsoon-agent.git"
+else
+  REPO="/workspace/emallsoon"
+  CLONE_URL="https://github.com/emallsoon/emallsoon.git"
+fi
 BACKUP="/workspace/.ssh-backup"
 TOTAL=7
 PASS=0; WARN=0
@@ -24,8 +34,22 @@ echo "=========================================="
 
 # ---------- 1. SSH 恢复 ----------
 echo "[1/$TOTAL] SSH 密钥与代理配置"
-if [ -f ~/.ssh/id_ed25519 ] && [ -f ~/.ssh/config ]; then
-  ok "SSH 已存在，跳过"
+# 通道探测(2026-08-30 实测):直连 22/443 被拦,但代理 CONNECT 到
+# github.com:22 与 ssh.github.com:443 均可达(nc -X connect 验证)。
+# curl telnet:// 方式测代理会误报失败,勿用。
+SSH_CHANNEL_OK=0
+if timeout 6 bash -c "echo > /dev/tcp/github.com/22" 2>/dev/null \
+   || timeout 6 bash -c "echo > /dev/tcp/ssh.github.com/443" 2>/dev/null; then
+  SSH_CHANNEL_OK=1
+elif command -v nc >/dev/null \
+   && timeout 10 nc -z -X connect -x 127.0.0.1:18080 ssh.github.com 443 >/dev/null 2>&1; then
+  SSH_CHANNEL_OK=1
+fi
+if [ "$SSH_CHANNEL_OK" -eq 0 ]; then
+  warn "出站 SSH 通道不可用(直连与代理均被拦)→ git 走 HTTPS 模式"
+  echo "     → pull/fetch 用 HTTPS origin;push 需 HTTPS 凭据或环境提供 SSH 通道"
+elif [ -f ~/.ssh/id_ed25519 ] && [ -f ~/.ssh/config ]; then
+  ok "SSH 已存在,跳过"
 else
   if [ -f "$BACKUP/id_ed25519" ]; then
     mkdir -p ~/.ssh && chmod 700 ~/.ssh
@@ -53,12 +77,20 @@ fi
 
 # ---------- 2. GitHub 认证 ----------
 echo "[2/$TOTAL] GitHub 认证测试"
-AUTH=$(timeout 20 ssh -T github-proxy 2>&1 || true)
-if echo "$AUTH" | grep -q "successfully authenticated"; then
-  ok "认证成功，可 push"
+if [ "$SSH_CHANNEL_OK" -eq 0 ]; then
+  if timeout 15 git ls-remote https://github.com/emallsoon/emallsoon-agent.git HEAD >/dev/null 2>&1; then
+    ok "HTTPS 匿名访问 GitHub 正常（pull/fetch 可用）"
+  else
+    warn "HTTPS 访问 GitHub 失败，检查网络"
+  fi
 else
-  warn "认证未通过：$AUTH"
-  echo "     → 若刚生成新密钥，需用户添加公钥后重跑本脚本"
+  AUTH=$(timeout 20 ssh -T github-proxy 2>&1 || true)
+  if echo "$AUTH" | grep -q "successfully authenticated"; then
+    ok "认证成功，可 push"
+  else
+    warn "认证未通过：$AUTH"
+    echo "     → 若刚生成新密钥，需用户添加公钥后重跑本脚本"
+  fi
 fi
 
 # ---------- 3. 仓库与工作区状态 ----------
@@ -70,7 +102,7 @@ if [ -d "$REPO/.git" ]; then
   ok "当前提交: $(git log --oneline -1)"
 else
   warn "仓库不存在！克隆中（公开仓库，无需认证）："
-  git clone https://github.com/emallsoon/emallsoon.git "$REPO" && ok "克隆完成" || warn "克隆失败，检查网络/代理"
+  git clone "$CLONE_URL" "$REPO" && ok "克隆完成" || warn "克隆失败，检查网络/代理"
   cd "$REPO" 2>/dev/null || exit 1
 fi
 
