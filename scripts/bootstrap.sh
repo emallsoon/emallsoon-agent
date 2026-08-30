@@ -129,21 +129,36 @@ timeout 30 git fetch origin 2>/dev/null && \
   ok "origin 同步: $(git rev-list --count origin/main..main 2>/dev/null || echo '?') 个本地未推送" || \
   warn "fetch 失败（认证或网络）"
 
-# ---------- 7. 真实浏览器恢复（Chrome DevTools MCP） ----------
-echo "[7/$TOTAL] 真实浏览器（chrome-devtools-mcp）"
-if [ -x /opt/google/chrome/chrome ] && /opt/google/chrome/chrome --version >/dev/null 2>&1; then
-  ok "浏览器就绪: $(/opt/google/chrome/chrome --version 2>/dev/null)"
+# ---------- 7. 隐身浏览器恢复（CloakBrowser，2026-08-30 起） ----------
+echo "[7/$TOTAL] 隐身浏览器（cloakbrowser）"
+export CLOAKBROWSER_CACHE_DIR="${CLOAKBROWSER_CACHE_DIR:-/workspace/.cloakbrowser}"
+export CLOAKBROWSER_SUPPRESS_FONT_WARNING=1
+if ! python3 -c "import cloakbrowser, pyotp" >/dev/null 2>&1; then
+  echo "     → 安装 cloakbrowser（playwright/httpx 等依赖一并装）..."
+  pip install 'cloakbrowser[serve,geoip]' pyotp --break-system-packages >/dev/null 2>&1 \
+    && ok "cloakbrowser pip 包已安装" || warn "pip 安装失败（检查网络/代理）"
 else
-  if bash "$REPO/scripts/setup-browser.sh" >/dev/null 2>&1; then
-    ok "已通过 setup-browser.sh 恢复浏览器"
-  else
-    warn "浏览器恢复失败（不影响构建/部署，仅影响真实浏览器验证）"
-    echo "     → 手动排查: bash $REPO/scripts/setup-browser.sh"
-  fi
+  ok "cloakbrowser pip 包已存在"
+fi
+# 二进制缓存在 /workspace/.cloakbrowser（持久卷，重置不丢）；缺失时首启自动下载
+if ls "$CLOAKBROWSER_CACHE_DIR"/chromium-*/chrome >/dev/null 2>&1; then
+  ok "stealth Chromium 二进制就绪: $(ls -d "$CLOAKBROWSER_CACHE_DIR"/chromium-* | head -1 | xargs basename)"
+else
+  warn "二进制缓存缺失，首次启动将下载 ~200MB（browser-serve.sh start 自动处理）"
+fi
+# 登录态档案 + cookie 备份
+[ -d /workspace/.browser-profile-cloak ] && ok "持久档案存在（.browser-profile-cloak）" || warn "持久档案缺失，需重新登录"
+ls /workspace/.browser-auth/cookies-*.json >/dev/null 2>&1 && ok "cookie 备份存在" || warn "无 cookie 备份"
+# 引擎验证：登录态巡检
+if bash "$REPO/scripts/browser-serve.sh" start >/dev/null 2>&1; then
+  ok "browser-serve 启动成功"
+  bash "$REPO/scripts/browser-serve.sh" stop >/dev/null 2>&1 || true
+else
+  warn "browser-serve 启动失败（手动排查: bash $REPO/scripts/browser-serve.sh start）"
 fi
 
 echo "=========================================="
 echo " 完成：$PASS 项通过"
 echo " 下一步：bash $REPO/scripts/backup-ssh.sh 可刷新密钥备份"
-echo "        bash $REPO/scripts/browser-shot.sh <url> <png> 网页截图"
+echo "        python3 $REPO/scripts/cloak_shot.py <url> <png> 网页落盘截图"
 echo "=========================================="

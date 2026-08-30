@@ -1,138 +1,125 @@
 #!/usr/bin/env bash
-# browser-serve.sh — 启动"持久化浏览器"
+# browser-serve.sh — 启动"持久化隐身浏览器"（CloakBrowser 引擎版）
 #
-# 目的：沙箱/集成浏览器的登录态无法导出（httpOnly cookie 读不到），
-#       因此用一个我们完全掌控的本地 Chrome：
-#         1. 用户数据目录放在 /workspace/.browser-profile（跨沙箱重置持久）
-#         2. CDP 端口 9223，可完整读取/写入 cookie（含 httpOnly）
-#         3. 通过 127.0.0.1:18080 代理上网
-#
-# 容器重置后的自动恢复（2026-08-30 实验验证）：
-#   - /root/.cache 下的 Chrome 二进制可能丢失 → 多级回退（151 → 131 → /opt）
-#   - 备用 Chrome 版本读取旧 profile 可能崩溃（版本降级路径）→ 自动清理
-#     Cache/Code Cache 后重试（登录态在 Cookies/Login Data，不在缓存中）
-#   - Cookies DB 若损坏/为空 → 自动从 /workspace/.browser-auth/latest.json 兜底恢复
-#   - Singleton 锁残留 → 启动前清理
+# 2026-08-30 起引擎从裸 Chrome 切换为 CloakBrowser：
+#   - pip 包 cloakbrowser（Playwright drop-in，Chromium 146 源码级 73 项反检测补丁）
+#   - 实测：裸 Chrome 走 GSC 登录被 reCAPTCHA Enterprise 卡死；
+#     CloakBrowser(humanize=True) 同流程未触发任何挑战，一次成功
+#   - 二进制缓存在 /workspace/.cloakbrowser（CLOAKBROWSER_CACHE_DIR 重定向），
+#     容器重置后无需重新下载；pip 包本身重置后需重装（见 bootstrap.sh 第 7 步）
+#   - 持久档案 /workspace/.browser-profile-cloak（BWT + GSC 登录态）
+#   - 不再暴露 CDP 9223 端口（Playwright 内部 pipe 通信）；
+#     cookie 读写一律走 Playwright API（scripts/cloak_common.py）
 #
 # 用法：
-#   bash scripts/browser-serve.sh start   # 启动（幂等 + 自动恢复）
-#   bash scripts/browser-serve.sh status  # 检查 CDP 是否可达
-#   bash scripts/browser-serve.sh stop    # 优雅关闭
+#   bash scripts/browser-serve.sh start    # 启动常驻上下文（幂等）
+#   bash scripts/browser-serve.sh status   # 查看进程与最近日志
+#   bash scripts/browser-serve.sh stop     # 优雅关闭（退出前自动备份 cookie）
+#   bash scripts/browser-serve.sh check    # 双平台登录态巡检（cloak_check.py）
 #
 # 产物：
-#   /workspace/.browser-profile/            Chrome 用户数据（登录态本体）
-#   /workspace/.browser-auth/cookies-*.json cookie 备份（cdp_cookies.py backup）
+#   /workspace/.browser-profile-cloak/           持久档案（登录态本体）
+#   /workspace/.browser-auth/cookies-cloak-*.json cookie 备份（Playwright 格式）
 
-set -euo pipefail
+set -uo pipefail
 
-PROFILE="/workspace/.browser-profile"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AUTH_DIR="/workspace/.browser-auth"
-CDP_PORT="${CDP_PORT:-9223}"
-PROXY="${PROXY:-http://127.0.0.1:18080}"
-COOKIE_TOOL="/workspace/emallsoon-agent/scripts/cdp_cookies.py"
+LOG="$AUTH_DIR/cloak-serve.log"
+HOLD="$HERE/cloak_hold.py"
+export CLOAKBROWSER_CACHE_DIR="${CLOAKBROWSER_CACHE_DIR:-/workspace/.cloakbrowser}"
+export CLOAKBROWSER_SUPPRESS_FONT_WARNING=1
 
-# 选择最新可用的 Chrome 二进制（多级回退，容器重置后二进制可能丢失）
-CHROME=""
-for c in \
-  /root/.cache/puppeteer/chrome/linux-151.0.7922.71/chrome-linux64/chrome \
-  /root/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome \
-  /opt/google/chrome/chrome; do
-  if [[ -x "$c" ]]; then CHROME="$c"; break; fi
-done
-[[ -n "$CHROME" ]] || { echo "ERROR: no chrome binary found"; exit 1; }
-
-cdp_alive() {
-  curl -s --max-time 3 "http://127.0.0.1:${CDP_PORT}/json/version" | grep -q Browser
+# 注意：pgrep 模式用 cloak_hol[d] 防自匹配（本脚本命令行里含 cloak_hold 字样）
+hold_pid() {
+  pgrep -f "cloak_hol[d]\\.py" | head -1
 }
 
-launch() {
-  local bin="$1"
-  rm -f "$PROFILE/SingletonLock" "$PROFILE/SingletonSocket" "$PROFILE/SingletonCookie"
-  nohup "$bin" \
-    --headless=new \
-    --user-data-dir="$PROFILE" \
-    --remote-debugging-port="$CDP_PORT" \
-    --remote-allow-origins='*' \
-    --proxy-server="$PROXY" \
-    --user-agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36' \
-    --no-sandbox --disable-gpu --disable-dev-shm-usage \
-    --disable-blink-features=AutomationControlled \
-    --window-size=1440,900 \
-    about:blank >/workspace/.browser-chrome.log 2>&1 &
-  for i in $(seq 1 20); do
-    sleep 0.5
-    cdp_alive && return 0
-  done
-  return 1
+alive() {
+  local pid; pid=$(hold_pid)
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
-# cookie 兜底恢复：Cookies DB 缺失或近乎为空时，从最新备份恢复
-restore_cookies_if_needed() {
-  local db="$PROFILE/Default/Cookies"
-  local latest="$AUTH_DIR/latest.json"
-  [[ -f "$latest" ]] || { echo "  (no cookie backup found, skip)"; return 0; }
-  local n=0
-  if [[ -f "$db" ]]; then
-    n=$(python3 - "$db" <<'EOF' 2>/dev/null || echo 0
-import sqlite3, sys
-try:
-    con = sqlite3.connect(sys.argv[1])
-    n = con.execute("SELECT COUNT(*) FROM cookies").fetchone()[0]
-    con.close()
-    print(n)
-except Exception:
-    print(0)
-EOF
-)
+ensure_deps() {
+  if ! python3 -c "import cloakbrowser" >/dev/null 2>&1; then
+    echo "cloakbrowser 未安装，正在安装（pip）..."
+    pip install 'cloakbrowser[serve,geoip]' pyotp --break-system-packages >/dev/null 2>&1 \
+      || { echo "ERROR: cloakbrowser 安装失败（网络？）"; exit 1; }
   fi
-  if [[ -z "$n" || "$n" -lt 10 ]]; then
-    echo "  Cookies DB empty/invalid ($n) -> restoring from backup"
-    python3 "$COOKIE_TOOL" restore --port "$CDP_PORT" --file "$latest" 2>&1 | sed 's/^/    /' || true
-  else
-    echo "  Cookies DB ok ($n cookies)"
+  if ! ls "$CLOAKBROWSER_CACHE_DIR"/chromium-*/chrome >/dev/null 2>&1; then
+    echo "首次运行：下载 stealth Chromium（~200MB，缓存在 $CLOAKBROWSER_CACHE_DIR）..."
   fi
 }
 
-case "${1:-start}" in
+# chrome-devtools MCP 在 Linux 只认 /opt/google/chrome/chrome。
+# Chrome 已卸载 → 放包装脚本指向 cloakbrowser 的 Chromium 二进制（无 X server，
+# root 运行，需追加沙箱/无头参数）。MCP 实例=独立临时 profile，仅作调试；
+# 登录态在 .browser-profile-cloak，由本脚本 start 持有。
+ensure_mcp_wrapper() {
+  local bin
+  bin=$(ls "$CLOAKBROWSER_CACHE_DIR"/chromium-*/chrome 2>/dev/null | head -1) || return 0
+  [[ -n "$bin" ]] || return 0
+  if [[ ! -x /opt/google/chrome/chrome ]] || ! grep -q "CloakBrowser" /opt/google/chrome/chrome 2>/dev/null; then
+    mkdir -p /opt/google/chrome
+    printf '#!/bin/bash\n# wrapper: chrome-devtools MCP -> CloakBrowser Chromium (2026-08-31, Chrome 已卸载)\n# 无 X server，root 运行：追加沙箱/无头必需参数后透传\nexec "%s" --no-sandbox --disable-gpu --disable-dev-shm-usage --headless=new "$@"\n' "$bin" \
+      > /opt/google/chrome/chrome && chmod +x /opt/google/chrome/chrome \
+      && echo "OK mcp-wrapper -> $bin" || echo "WARN mcp-wrapper 写入失败（MCP 调试不可用，不影响 serve）"
+  fi
+}
+
+
+case "${1:-status}" in
   start)
-    mkdir -p "$PROFILE" "$AUTH_DIR"
-    chmod 700 "$AUTH_DIR" 2>/dev/null || true
-    if cdp_alive; then
-      echo "OK already-running port=${CDP_PORT} profile=${PROFILE}"
+    ensure_deps
+    ensure_mcp_wrapper
+    if alive; then
+      echo "OK already-running pid=$(hold_pid)"
+      tail -1 "$LOG" 2>/dev/null || true
       exit 0
     fi
-    echo "Using chrome: $CHROME"
-    if launch "$CHROME"; then
-      echo "OK started port=${CDP_PORT} chrome=${CHROME} profile=${PROFILE}"
+    mkdir -p "$AUTH_DIR"
+    nohup python3 "$HOLD" >"$LOG" 2>&1 &
+    local_pid=$!
+    for _ in $(seq 1 60); do   # 最长 30s：含可能的二进制首载
+      sleep 0.5
+      grep -q "OK cloak-hold" "$LOG" 2>/dev/null && break
+      kill -0 "$local_pid" 2>/dev/null || { echo "ERROR: cloak_hold 退出，日志："; tail -5 "$LOG"; exit 1; }
+    done
+    if grep -q "OK cloak-hold" "$LOG" 2>/dev/null; then
+      echo "OK started pid=$(hold_pid)"
+      grep "OK cloak-hold" "$LOG" | tail -1
     else
-      echo "WARN first launch failed; cleaning cache and retrying..."
-      # 版本降级时旧缓存结构可能导致崩溃；缓存不含登录态，可安全清理
-      rm -rf "$PROFILE/Default/Cache" "$PROFILE/Default/Code Cache" \
-             "$PROFILE/Default/Service Worker/CacheStorage" 2>/dev/null || true
-      if launch "$CHROME"; then
-        echo "OK started (after cache cleanup) port=${CDP_PORT} chrome=${CHROME}"
-      else
-        echo "FAILED to start; log:"; tail -n 20 /workspace/.browser-chrome.log
-        exit 1
-      fi
-    fi
-    restore_cookies_if_needed
-    ;;
-  status)
-    if cdp_alive; then
-      echo "UP $(curl -s "http://127.0.0.1:${CDP_PORT}/json/version" | head -c 200)"
-    else
-      echo "DOWN"
+      echo "WARN 启动慢或异常，最近日志："; tail -3 "$LOG"
+      exit 1
     fi
     ;;
   stop)
-    if cdp_alive; then
-      PID=$(ss -ltnp 2>/dev/null | awk -v p=":${CDP_PORT}" '$4 ~ p {print $NF}' | grep -oP 'pid=\K[0-9]+' | head -1 || true)
-      [[ -n "${PID:-}" ]] && kill "$PID" && echo "OK stopped pid=$PID" || echo "no pid found"
+    pid=$(hold_pid)
+    if [[ -z "$pid" ]]; then echo "OK not-running"; exit 0; fi
+    kill "$pid" 2>/dev/null
+    for _ in $(seq 1 20); do sleep 0.5; kill -0 "$pid" 2>/dev/null || break; done
+    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+    echo "OK stopped（退出前已备份 cookie，见日志尾部）"
+    tail -2 "$LOG" 2>/dev/null || true
+    ;;
+  restart)
+    "$0" stop; sleep 1; "$0" start
+    ;;
+  status)
+    if alive; then
+      echo "RUNNING pid=$(hold_pid)"
+      grep "OK cloak-hold" "$LOG" 2>/dev/null | tail -1
+      exit 0
     else
-      echo "already down"
+      echo "STOPPED（bash scripts/browser-serve.sh start 启动）"
+      exit 1
     fi
     ;;
+  check)
+    exec python3 "$HERE/cloak_check.py"
+    ;;
   *)
-    echo "usage: $0 {start|status|stop}"; exit 1;;
+    echo "用法: $0 {start|stop|restart|status|check}"
+    exit 2
+    ;;
 esac

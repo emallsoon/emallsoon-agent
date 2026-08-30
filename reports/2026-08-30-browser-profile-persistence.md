@@ -1,7 +1,8 @@
 # 浏览器登录态持久化方案（profile 直存 + 自动恢复）
 
-> 日期：2026-08-30
-> 结论：**可以。通过把 Chrome 用户数据目录（profile）直接持久化到 `/workspace`，浏览器登录状态在沙盒容器重置后不丢失。** 已通过换版本重启 + 完整重启模拟实验验证。
+> 日期：2026-08-30（2026-08-31 追加 §8：引擎切换 Chrome → CloakBrowser）
+> 结论：**可以。通过把浏览器用户数据目录（profile）直接持久化到 `/workspace`，登录状态在沙盒容器重置后不丢失。** 已通过换版本重启 + 完整重启 + 真实容器重置验证。
+> **2026-08-31 起浏览器引擎为 CloakBrowser（Chromium 146 源码级反指纹），GSC 登录一次成功、无 reCAPTCHA，双平台登录态在线。当前架构与命令以 §8 为准，§2–§6 中的 Chrome/CDP 内容为历史记录。**
 
 ## 1. 背景问题
 
@@ -64,32 +65,98 @@
 
 ## 5. 自动恢复机制（browser-serve.sh）
 
+> ⚠️ 本节为 Chrome 时代机制，已随 §8 引擎切换重写；新版自愈逻辑见 §8.5。
+
 1. **Chrome 多级回退**：`linux-151 → linux-131 → /opt/google/chrome/chrome`。
 2. **Singleton 锁清理**：启动前删除残留锁文件。
 3. **启动失败自愈**：首次启动失败 → 自动清理 `Cache / Code Cache / Service Worker CacheStorage`（登录态不在缓存）→ 重试。
 4. **Cookie 备份兜底**：启动后检查 `Default/Cookies`，若缺失或 `< 10` 个 → 自动从 `/workspace/.browser-auth/latest.json` 恢复（幂等，含 httpOnly）。
-5. **备份机制**：`python3 scripts/cdp_cookies.py backup --port 9223`（当前 141 cookies，含 GSC + Bing 完整会话）。
+5. **备份机制**：serve 停止时自动备份 + 手动 `python3 scripts/cdp_cookies.py backup --port 9223`。
 
-## 6. 使用手册
+## 6. 使用手册（已迁移，现行命令见 §8.6）
+
+> ⚠️ Chrome/CDP 版命令已失效（Chrome 已卸载、9223 不再暴露），旧脚本移至 `scripts/legacy/`。现行命令：
 
 ```bash
-# 启动（幂等 + 自动恢复）
-bash scripts/browser-serve.sh start
-# 状态 / 停止
-bash scripts/browser-serve.sh status
-bash scripts/browser-serve.sh stop
-# 备份 / 恢复 cookie（登录态双重保险）
-python3 scripts/cdp_cookies.py backup --port 9223
-python3 scripts/cdp_cookies.py restore --port 9223 --file /workspace/.browser-auth/latest.json
+bash scripts/browser-serve.sh start    # 启动（幂等 + cookie 自动恢复）
+bash scripts/browser-serve.sh status   # 状态
+bash scripts/browser-serve.sh check    # GSC + BWT 双登录态在线检查（退出码 0=双在线）
+bash scripts/browser-serve.sh stop     # 停止（退出前自动备份 cookie）
+python3 scripts/cloak_gsc_login.py     # GSC 重登（幂等，--force 强制重跑）
 ```
-
-登录脚本（凭据在 `/workspace/.browser-auth/credentials.env`，模式 600，不入库；脚本已在仓库 `scripts/`，跨重置可用）：
-
-- GSC：`python3 scripts/gsc_login.py`（邮箱→密码→TOTP；若遇 reCAPTCHA 风控，等待冷却后重跑）
-- Bing：`python3 scripts/bing_login.py`（MS 账号，"Use your password" 绕过邮箱验证码；BWT 控制台点 Sign In → 账户卡片）
 
 ## 7. 结论与边界
 
 - ✅ **profile 直存方案成立**：把 Chrome 用户数据目录放 `/workspace`，容器重置后登录态保留（Bing 实测通过；Google cookie 完整落盘 + 备份，仅需在风控冷却后重登）。
 - ⚠️ **边界 1**：Chrome 版本降级（新版本写的 profile 用旧版本读）可能崩溃 → 用同版本/新版本 Chrome，或依赖 cookie 备份兜底恢复。
 - ⚠️ **边界 2**：Google 对"进程异常切换/登录环境突变"有服务端风控，可能吊销会话 → 必须配合 cookie 备份 + 重登脚本；Bing/Microsoft 无此问题。
+
+## 8. 引擎切换：Chrome → CloakBrowser（2026-08-31）
+
+### 8.1 动机
+
+§4.4 之后尝试恢复 GSC：bare Chrome（即使 GUI/Xvfb + noVNC 人工点验证）仍被 **reCAPTCHA Enterprise** 拦截（checkbox 点击后 `checked=false`）。结论是裸 Chrome 指纹已被 Google 风控标记，人工介入也过不去 → 换引擎：**[CloakBrowser](https://github.com/CloakHQ/CloakBrowser)**（73 个 C++ 源码级反指纹补丁的 Chromium，Playwright drop-in）。
+
+### 8.2 卸载与安装
+
+| 步骤 | 结果 |
+|---|---|
+| 卸载 Chrome | `/root/.cache/puppeteer`（1.3G，Chrome 131+151）删除；`/opt/google/chrome` 已于此前重置中消失 |
+| 安装 | `pip install 'cloakbrowser[serve,geoip]' --break-system-packages` → cloakbrowser 0.5.10 + playwright 1.62.0 |
+| 二进制 | 免费档 Chromium **146.0.7680.177.5**（UA `Chrome/146.0.0.0` Windows），首次下载 11.6s |
+| **缓存持久化** | `CLOAKBROWSER_CACHE_DIR=/workspace/.cloakbrowser`（801M）→ 容器重置后**无需重新下载 200MB**，仅 pip 包需重装（bootstrap.sh 步骤 7 自动做） |
+| 字体 | Windows 专有字体无法安装 → `CLOAKBROWSER_SUPPRESS_FONT_WARNING=1` + 安装 noto/emoji/CJK 基线字体 |
+
+### 8.3 反指纹验证（bot.sannysoft.com）
+
+**22/22 全绿**：`webdriver=False`、`plugins=5`、`window.chrome=object`、UA `Chrome/146 Windows`、无 HEADCHR/PHANTOM 泄漏（截图 `/workspace/cloak-smoke-sannysoft.png`）。
+
+### 8.4 关键结果：GSC 一次成功、无任何挑战
+
+沿用 §3 的 profile 直存思路，但**新 profile**（旧 151 profile 与 146 二进制跨大版本降级会崩，见 §7 边界 1）+ **cookie 备份恢复**：
+
+1. 新 profile `/workspace/.browser-profile-cloak`，`launch_persistent_context(headless=True, humanize=True)`；
+2. 从备份恢复 139 cookies（CDP 格式 → Playwright 格式转换，`cloak_common.py`）→ **Bing 立即在线**（首页 "ren jie"）；
+3. GSC 流程：ServiceLogin → 账户选择 → 密码 → **直落 Search Console，全程无 reCAPTCHA/TOTP**（截图 `/workspace/gsc-cloak-*.png`）；
+4. 备份 141 cookies（`cookies-cloak-20260830-220746.json`）；
+5. `cloak_check.py` 双平台终验：**GSC ✅ + BWT ✅，exit=0**（BWT 检测用 meControl `#mectrl_main` + 控制台 dashboard 关键词兜底）。
+
+> 对照 §4.4：同一账号、同一环境，bare Chrome 被 reCAPTCHA Enterprise 挡住，CloakBrowser 畅通 —— **引擎级指纹是根因，profile 方案本身一直成立**。
+
+### 8.5 现行架构与自愈（scripts/）
+
+```
+/workspace/.cloakbrowser/          Chromium 146 二进制缓存（持久卷，免重下）
+/workspace/.browser-profile-cloak/ 当前 profile（GSC + BWT 双登录态本体）
+/workspace/.browser-auth/          credentials.env(600) + cookies-cloak-*.json + latest-cloak.json 指针
+scripts/cloak_common.py            环境变量/凭据/CDP→Playwright cookie 转换/条件恢复/备份
+scripts/cloak_hold.py              serve 守护：持有持久上下文，SIGTERM 退出前自动备份
+scripts/cloak_gsc_login.py         GSC 重登（幂等；--force 强制）
+scripts/cloak_check.py             双平台在线检查（退出码 0=双在线）
+scripts/cloak_shot.py              网页落盘截图（临时 profile，替代 legacy/browser-shot.sh）
+scripts/browser-serve.sh           start|stop|restart|status|check 统一入口
+scripts/legacy/                    Chrome/CDP 时代旧脚本（退役存档）
+```
+
+自愈逻辑：serve 启动 → 若 profile cookie 罐 `< 10` → 自动从 `latest-cloak.json` 指针恢复（优先 cloak 备份，回退旧 CDP 备份）；serve 停止 → 退出前自动备份。CDP 9223 不再暴露，全部走 Playwright API。
+
+**附带修复（Chrome DevTools MCP 续命）**：MCP 在 Linux 只认 `/opt/google/chrome/chrome`，Chrome 卸载后本会失效 → `browser-serve.sh start` 自动放包装脚本指向 cloakbrowser 的 Chromium 二进制（追加 `--no-sandbox --disable-gpu --disable-dev-shm-usage --headless=new`）。实测 MCP 可正常启页面，且因补丁在二进制内，sannysoft 反检测同样全过（WebDriver missing、plugins=5、无 HEADCHR 泄漏；UA 为 Linux 原生——Windows 人设由 Python 层注入，MCP 直启不经过，故 MCP 仅用于调试，登录态操作走 serve/cloak 脚本）。
+
+### 8.6 现行使用手册
+
+```bash
+bash scripts/browser-serve.sh start    # 启动（幂等，自动恢复 cookie）
+bash scripts/browser-serve.sh status   # 状态（pid + cookie 数 + UA）
+bash scripts/browser-serve.sh check    # GSC + BWT 在线检查（截图 /workspace/cloak-check-*.png）
+bash scripts/browser-serve.sh stop     # 停止（退出前自动备份 cookie）
+python3 scripts/cloak_gsc_login.py     # GSC 重登（掉线时；幂等）
+```
+
+容器重置后：`bash scripts/bootstrap.sh`（步骤 7 自动重装 cloakbrowser pip 包 + 校验二进制缓存/profile/备份，然后起 serve）。
+
+### 8.7 边界更新
+
+- ⚠️ **并发**：Chromium profile 锁 → 同一 `user_data_dir` 同时只能开一个持久上下文；跑独立脚本（`cloak_gsc_login.py` 等）前先 `browser-serve.sh stop`。
+- ⚠️ **免费档**：单并发会话；binary 版本随官方免费档更新（当前 146），大版本变化时如遇 profile 降级问题 → 新 profile + cookie 恢复（本次已验证该路径）。
+- ✅ 边界 2（Google 风控）在 CloakBrowser 下未再出现；若未来再现，重跑 `cloak_gsc_login.py`（含 TOTP 自动生成分支）。
+
