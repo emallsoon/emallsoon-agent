@@ -43,7 +43,7 @@ const faqs = [
   },
   {
     q: 'Is an eBay Store subscription worth it?',
-    a: 'It depends on your category and volume. Store subscriptions start at $4.95/month (Starter) and go up to $2,999.95/month (Enterprise). The main benefit is discounted final value fees and more free monthly listings. For example, a Basic Store ($21.95/month) reduces electronics fees from 13.6% to 9.35% — saving 4.25% per sale. If you sell $600/month of electronics, the $21.95 subscription saves you $25.50/month. Use the calculator with the Store toggle on to see if your volume justifies the subscription.',
+    a: 'It depends on your category and volume. Store subscriptions start at $4.95/month (Starter) and go up to $2,999.95/month (Enterprise). The main benefit is discounted final value fees and more free monthly listings. For example, a Basic Store ($21.95/month on annual billing — $27.95 month-to-month) reduces electronics fees from 13.6% to 9.35% — saving 4.25% per sale. If you sell $600/month of electronics, the subscription saves you $25.50/month, more than the fee. Use the calculator with the Store toggle on to see if your volume justifies the subscription.',
   },
   {
     q: 'What are promoted listings and do I need them?',
@@ -51,7 +51,7 @@ const faqs = [
   },
   {
     q: 'How does eBay calculate the final value fee?',
-    a: 'The final value fee is calculated on the total amount of the sale: item price + shipping charged to buyer + sales tax + handling charges. For most categories as an individual seller, that is 13.6% of the total, plus a per-order fee. For items selling over $7,500, the rate drops to 2.35% on the portion above $7,500. Store subscribers have a lower threshold ($2,500) after which the 2.35% rate kicks in. The calculator handles all of this automatically based on your inputs.',
+    a: 'The final value fee is calculated on the total amount of the sale: item price + shipping charged to buyer + sales tax + handling charges. For most categories as an individual seller, that is 13.6% of the total, plus a per-order fee. High-value sales get a lower rate on the portion above a category threshold: for most categories 2.35% above $7,500, while Store subscribers hit the reduced rate sooner at $2,500. Exceptions: Jewelry & Watches pays 9% above $5,000 (7% for stores), Auto Parts store subscribers above just $1,000, and Coins & Paper Money store subscribers above $4,000. The calculator applies these tiered rates automatically based on your inputs.',
   },
   {
     q: 'Why is my eBay profit lower than expected?',
@@ -116,7 +116,16 @@ const freeListings = ebayFreeListingsPerMonth;
                 <label for="category">Category</label>
                 <select id="category">
                   {ebayCategories.map((c) => (
-                    <option value={c.id} data-individual={c.individualPct} data-store={c.storePct} data-per-order={c.perOrderFeeApplies ? '1' : '0'}>{c.label}</option>
+                    <option
+                      value={c.id}
+                      data-individual={c.individualPct}
+                      data-store={c.storePct}
+                      data-per-order={c.perOrderFeeApplies ? '1' : '0'}
+                      data-ind-threshold={c.individualThreshold ?? ''}
+                      data-ind-over={c.individualOverPct ?? ''}
+                      data-store-threshold={c.storeThreshold ?? ''}
+                      data-store-over={c.storeOverPct ?? ''}
+                    >{c.label}</option>
                   ))}
                 </select>
                 <span class="hint">Final value fee varies by category</span>
@@ -215,8 +224,11 @@ const freeListings = ebayFreeListingsPerMonth;
               <p class="disclaimer">
                 Final value fee is calculated on total sale amount (price +
                 shipping + tax). Per-order fee is $0.30 for orders ≤$10,
-                $0.40 for orders >$10. Store subscriber rates shown when
-                toggled. Excludes sales tax (collected and remitted by eBay).
+                $0.40 for orders >$10. High-value sales: only the portion
+                above the category threshold ($7,500 for most categories,
+                $2,500 for Store subscribers) is charged the reduced rate.
+                Store subscriber rates shown when toggled. Excludes sales
+                tax (collected and remitted by eBay).
               </p>
             </div>
             <div class="tear"></div>
@@ -258,6 +270,14 @@ const freeListings = ebayFreeListingsPerMonth;
           no per-order fee. The calculator includes all major category
           rates, so switch the dropdown to match what you sell.
         </p>
+        <p>
+          High-value sales also get a break: only the portion of the sale
+          above a category threshold is charged the reduced rate — 2.35%
+          over $7,500 in most categories for individual sellers, and over
+          $2,500 for Store subscribers. A few categories differ (Jewelry &
+          Watches, Auto Parts, Coins &amp; Paper Money), and the calculator
+          applies each tier automatically.
+        </p>
 
         <h3>Layer 2: Per-order fee (the small but constant charge)</h3>
         <p>
@@ -281,7 +301,8 @@ const freeListings = ebayFreeListingsPerMonth;
           the discount is dramatic: Consumer Electronics drops from 13.6%
           to 9.35% (4.25% saving), Computers from 13.6% to 7.35% (6.25%
           saving). If you sell $1,000/month of computers, the 6.25%
-          saving ($62.50) dwarfs the $21.95/month Basic Store fee. Toggle
+          saving ($62.50) dwarfs the Basic Store fee ($21.95/month billed
+          annually; $27.95 month-to-month). Toggle
           the Store checkbox in the calculator to see if your category and
           volume justify the subscription.
         </p>
@@ -328,8 +349,8 @@ const freeListings = ebayFreeListingsPerMonth;
         <p>
           The same item as a Store subscriber (9.35% electronics rate) would
           pay $5.61 FVF instead of $8.16 — saving $2.55 per sale. If you
-          sell 10+ electronics items per month, the $21.95 Basic Store fee
-          pays for itself. Use the <a
+          sell 10+ electronics items per month, the Basic Store fee
+          ($21.95/month on annual billing) pays for itself. Use the <a
           href="/tools/amazon-fba-profit-calculator/">Amazon FBA
           calculator</a> to compare eBay vs Amazon for the same product, and
           the <a href="/tools/roas-break-even-calculator/">ROAS
@@ -416,6 +437,8 @@ const freeListings = ebayFreeListingsPerMonth;
   }
 </style>
 
+<script type="application/json" id="ebay-fee-config" set:html={JSON.stringify({ perOrderUnder10, perOrderOver10 })}></script>
+
 <script>
   function $<T extends HTMLElement = HTMLInputElement>(id: string): T {
     return document.getElementById(id) as T;
@@ -430,8 +453,14 @@ const freeListings = ebayFreeListingsPerMonth;
     return Number.isFinite(v) && v >= 0 ? v : 0;
   }
 
-  const PER_ORDER_UNDER_10 = {perOrderUnder10};
-  const PER_ORDER_OVER_10 = {perOrderOver10};
+  // Astro does not interpolate frontmatter values inside <script> tags,
+  // so constants are passed in via a JSON block rendered in the template.
+  const CFG = JSON.parse(
+    (document.getElementById('ebay-fee-config') as HTMLScriptElement).textContent || '{}'
+  ) as { perOrderUnder10: number; perOrderOver10: number };
+
+  const PER_ORDER_UNDER_10 = CFG.perOrderUnder10;
+  const PER_ORDER_OVER_10 = CFG.perOrderOver10;
 
   function recalc() {
     const price = read('price');
@@ -448,15 +477,37 @@ const freeListings = ebayFreeListingsPerMonth;
     const storePct = parseFloat(selected?.dataset.store ?? '12.7') || 12.7;
     const perOrderApplies = selected?.dataset.perOrder === '1';
 
+    // Tiered rates: high-value sales pay a lower % on the portion above
+    // a category threshold (e.g. 2.35% over $7,500 for most categories,
+    // $2,500 for Store subscribers). Empty data attribute = flat rate.
+    const num = (v: string | undefined) => {
+      const n = parseFloat(v ?? '');
+      return Number.isFinite(n) ? n : null;
+    };
+    const indThreshold = num(selected?.dataset.indThreshold);
+    const indOver = num(selected?.dataset.indOver);
+    const storeThreshold = num(selected?.dataset.storeThreshold);
+    const storeOver = num(selected?.dataset.storeOver);
+
     const feeRate = isStore ? storePct : individualPct;
-    $('t-fvf-rate').textContent = `(${feeRate}%)`;
+    const threshold = isStore ? storeThreshold : indThreshold;
+    const overRate = isStore ? storeOver : indOver;
 
     // eBay calculates FVF on total sale amount (price + shipping + tax)
     // We simplify: total = price + shipping (tax is collected & remitted by eBay)
     const totalSale = price + shipping;
 
-    // Final value fee
-    const fvf = totalSale * (feeRate / 100);
+    // Final value fee (marginal: threshold portion at base rate, remainder
+    // at the reduced over-rate)
+    let fvf: number;
+    if (threshold !== null && overRate !== null && totalSale > threshold) {
+      fvf = threshold * (feeRate / 100) + (totalSale - threshold) * (overRate / 100);
+      const eff = (fvf / totalSale) * 100;
+      $('t-fvf-rate').textContent = `(${feeRate}% + ${overRate}% over $${threshold.toLocaleString('en-US')} · ${eff.toFixed(1)}% eff.)`;
+    } else {
+      fvf = totalSale * (feeRate / 100);
+      $('t-fvf-rate').textContent = `(${feeRate}%)`;
+    }
 
     // Per-order fee
     let perOrderFee = 0;

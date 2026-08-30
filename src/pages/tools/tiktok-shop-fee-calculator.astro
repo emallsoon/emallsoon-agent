@@ -401,6 +401,8 @@ const refundCap = tiktokRefundAdminCap;
   }
 </style>
 
+<script type="application/json" id="tiktok-fee-config" set:html={JSON.stringify({ refundPct, refundCap })}></script>
+
 <script>
   function $<T extends HTMLElement = HTMLInputElement>(id: string): T {
     return document.getElementById(id) as T;
@@ -415,8 +417,14 @@ const refundCap = tiktokRefundAdminCap;
     return Number.isFinite(v) && v >= 0 ? v : 0;
   }
 
-  const REFUND_ADMIN_PCT = {refundPct};
-  const REFUND_ADMIN_CAP = {refundCap};
+  // Injected via JSON block — Astro does not interpolate frontmatter
+  // values inside <script> tags.
+  const CFG = JSON.parse(
+    (document.getElementById('tiktok-fee-config') as HTMLScriptElement).textContent || '{}'
+  ) as { refundPct: number; refundCap: number };
+
+  const REFUND_ADMIN_PCT = CFG.refundPct;
+  const REFUND_ADMIN_CAP = CFG.refundCap;
 
   function recalc() {
     const price = read('price');

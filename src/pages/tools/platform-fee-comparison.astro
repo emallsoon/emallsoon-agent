@@ -2,6 +2,18 @@
 import BaseLayout from '../../layouts/BaseLayout.astro';
 import ToolCard from '../../components/ToolCard.astro';
 import { tools } from '../../data/tools';
+import {
+  referralDefault,
+  ebayCategories,
+  ebayPerOrderOver10,
+  etsyListingFee,
+  etsyTransactionPct,
+  etsyProcessingPct,
+  etsyProcessingFlat,
+  shopifyProcessingPct,
+  shopifyProcessingFlat,
+  tiktokReferralDefault,
+} from '../../data/fees';
 
 const tool = tools.find((t) => t.slug === 'platform-fee-comparison')!;
 const related = tools.filter((t) => t.slug !== tool.slug).slice(0, 3);
@@ -68,23 +80,24 @@ const faqJsonLd = {
   })),
 };
 
-// Fee constants for server-side rendering of defaults
-const amazonReferralPct = 15;
-const amazonFbaFee = 5.5;
-const ebayFvfPct = 13.6;
-const ebayPerOrder = 0.4;
-const ebayPromotedPct = 3;
-const etsyListingFee = 0.2;
-const etsyTransactionPct = 6.5;
-const etsyProcessingPct = 3;
-const etsyProcessingFlat = 0.25;
-const shopifyProcPct = 2.9;
-const shopifyProcFlat = 0.3;
-const shopifyAdCost = 10;
-const tiktokReferralPct = 6;
-const tiktokAffiliatePct = 5;
-const tiktokAdCost = 6;
-const tiktokFbtFee = 4;
+// Fee defaults (single source of truth: src/data/fees.ts). Passed to the
+// client script via a JSON config block — Astro does not interpolate
+// frontmatter values inside <script> tags.
+const ebayMost = ebayCategories.find((c) => c.id === 'most')!;
+const feeConfig = {
+  amazonReferralPct: referralDefault,
+  ebayFvfPct: ebayMost.individualPct,
+  ebayPerOrder: ebayPerOrderOver10,
+  ebayPromotedPct: 3,
+  etsyListingFee,
+  etsyTransactionPct,
+  etsyProcessingPct,
+  etsyProcessingFlat,
+  shopifyProcPct: shopifyProcessingPct,
+  shopifyProcFlat: shopifyProcessingFlat,
+  tiktokReferralPct: tiktokReferralDefault,
+  tiktokAffiliatePct: 5,
+};
 ---
 
 <BaseLayout
@@ -233,7 +246,8 @@ const tiktokFbtFee = 4;
           with lower conversion rates. For electronics, books, and
           collectibles, eBay's category-specific rates can be dramatically
           lower: 6.7% for guitars, 8% for sneakers over $150. A Store
-          subscription ($21.95/month) cuts electronics from 13.6% to 9.35%,
+          subscription ($21.95/month billed annually — $27.95
+          month-to-month) cuts electronics from 13.6% to 9.35%,
           which pays for itself at ~$600/month in electronics sales.
         </p>
 
@@ -454,6 +468,8 @@ const tiktokFbtFee = 4;
   }
 </style>
 
+<script type="application/json" id="cmp-fee-config" set:html={JSON.stringify(feeConfig)}></script>
+
 <script>
   function $<T extends HTMLElement = HTMLInputElement>(id: string): T {
     return document.getElementById(id) as T;
@@ -468,19 +484,37 @@ const tiktokFbtFee = 4;
     return Number.isFinite(v) && v >= 0 ? v : 0;
   }
 
-  // Platform fee constants (from fees.ts defaults)
-  const AMZ_REFERRAL = {amazonReferralPct} / 100;
-  const EBAY_FVF = {ebayFvfPct} / 100;
-  const EBAY_PER_ORDER = {ebayPerOrder};
-  const EBAY_PROMOTED = {ebayPromotedPct} / 100;
-  const ETSY_LISTING = {etsyListingFee};
-  const ETSY_TXN = {etsyTransactionPct} / 100;
-  const ETSY_PROC = {etsyProcessingPct} / 100;
-  const ETSY_PROC_FLAT = {etsyProcessingFlat};
-  const SHO_PROC = {shopifyProcPct} / 100;
-  const SHO_PROC_FLAT = {shopifyProcFlat};
-  const TT_REFERRAL = {tiktokReferralPct} / 100;
-  const TT_AFFILIATE = {tiktokAffiliatePct} / 100;
+  // Platform fee constants (from fees.ts defaults, injected via JSON block —
+  // Astro does not interpolate frontmatter values inside <script> tags)
+  const CFG = JSON.parse(
+    (document.getElementById('cmp-fee-config') as HTMLScriptElement).textContent || '{}'
+  ) as {
+    amazonReferralPct: number;
+    ebayFvfPct: number;
+    ebayPerOrder: number;
+    ebayPromotedPct: number;
+    etsyListingFee: number;
+    etsyTransactionPct: number;
+    etsyProcessingPct: number;
+    etsyProcessingFlat: number;
+    shopifyProcPct: number;
+    shopifyProcFlat: number;
+    tiktokReferralPct: number;
+    tiktokAffiliatePct: number;
+  };
+
+  const AMZ_REFERRAL = CFG.amazonReferralPct / 100;
+  const EBAY_FVF = CFG.ebayFvfPct / 100;
+  const EBAY_PER_ORDER = CFG.ebayPerOrder;
+  const EBAY_PROMOTED = CFG.ebayPromotedPct / 100;
+  const ETSY_LISTING = CFG.etsyListingFee;
+  const ETSY_TXN = CFG.etsyTransactionPct / 100;
+  const ETSY_PROC = CFG.etsyProcessingPct / 100;
+  const ETSY_PROC_FLAT = CFG.etsyProcessingFlat;
+  const SHO_PROC = CFG.shopifyProcPct / 100;
+  const SHO_PROC_FLAT = CFG.shopifyProcFlat;
+  const TT_REFERRAL = CFG.tiktokReferralPct / 100;
+  const TT_AFFILIATE = CFG.tiktokAffiliatePct / 100;
 
   interface Platform {
     id: string;

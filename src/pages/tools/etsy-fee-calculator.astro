@@ -8,6 +8,7 @@ import {
   etsyProcessingPct,
   etsyProcessingFlat,
   offsiteAdsOptions,
+  offsiteAdsCap,
 } from '../../data/fees';
 
 const tool = tools.find((t) => t.slug === 'etsy-fee-calculator')!;
@@ -320,6 +321,8 @@ const faqJsonLd = {
   }
 </style>
 
+<script type="application/json" id="etsy-fee-config" set:html={JSON.stringify({ offsiteAdsCap })}></script>
+
 <script>
   function $(id: string) {
     return document.getElementById(id) as HTMLInputElement;
@@ -333,6 +336,12 @@ const faqJsonLd = {
     const v = parseFloat($(id).value);
     return Number.isFinite(v) && v >= 0 ? v : 0;
   }
+
+  // Injected via JSON block — Astro does not interpolate frontmatter
+  // values inside <script> tags.
+  const CFG = JSON.parse(
+    (document.getElementById('etsy-fee-config') as HTMLScriptElement).textContent || '{}'
+  ) as { offsiteAdsCap: number };
 
   let lastProfit: number | null = null;
 
@@ -352,7 +361,9 @@ const faqJsonLd = {
     const listingFee = listing * qty;
     const txn = orderTotal * (txnPct / 100);
     const proc = orderTotal > 0 ? orderTotal * (procPct / 100) + procFlat : 0;
-    const offsite = orderTotal * (offsitePct / 100);
+    // Etsy caps the Offsite Ads fee at $100 per order (US), regardless
+    // of the 12%/15% rate.
+    const offsite = offsitePct > 0 ? Math.min(orderTotal * (offsitePct / 100), CFG.offsiteAdsCap) : 0;
     const productCost = cost * qty;
     const totalFees = listingFee + txn + proc + offsite;
     const profit = orderTotal - totalFees - productCost - shipCost;
