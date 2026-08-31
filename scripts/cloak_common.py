@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """CloakBrowser 公共模块：环境变量、profile/备份路径、cookie 恢复与备份。
 
-引擎说明（2026-08-30 起替代裸 Chrome）：
-  - pip 包   : cloakbrowser（Playwright drop-in，Chromium 源码级 73 项反检测补丁）
+引擎说明（2026-08-30 起替代裸 Chrome；2026-08-31 完成全量本地化）：
+  - pip 包   : cloakbrowser 0.5.10（Playwright drop-in，Chromium 源码级 73 项反检测补丁）
+               安装于 /workspace/.pylibs（pip --target），重置后免重装，
+               用法: sys.path.insert(0, "/workspace/.pylibs")
   - 二进制   : /workspace/.cloakbrowser/chromium-<ver>/chrome（CLOAKBROWSER_CACHE_DIR 重定向，
                容器重置后无需重新下载 200MB）
+  - 系统库   : /workspace/.cloakbrowser/libs（5 个 Chromium 依赖 .so，共 644K，
+               经 LD_LIBRARY_PATH 注入——重置后系统缺 libatk 等也不影响启动；
+               2026-08-31 实测:重置清掉系统库后,仅靠该目录即可跑通 chrome）
   - 持久档案 : /workspace/.browser-profile-cloak（BWT + GSC 登录态都在里面）
   - 免费版   : tier=free，无 license key，单并发；UA = Chrome/146 Windows
 """
@@ -21,9 +26,47 @@ BWT_URL = "https://www.bing.com/webmasters"
 
 
 def setup_env():
-    """必须在 import cloakbrowser 前调用（其实随时调用都行，config 每次读 env）。"""
+    """必须在 import cloakbrowser 前调用（其实随时调用都行，config 每次读 env）。
+
+    2026-08-31 起同时注入 LD_LIBRARY_PATH：Chromium 的 5 个系统依赖库存于
+    /workspace/.cloakbrowser/libs，容器重置后系统目录被清也能正常启动浏览器。
+    """
     os.environ.setdefault("CLOAKBROWSER_CACHE_DIR", CLOAK_CACHE)
     os.environ.setdefault("CLOAKBROWSER_SUPPRESS_FONT_WARNING", "1")
+    libs = os.path.join(CLOAK_CACHE, "libs")
+    if os.path.isdir(libs):
+        existing = os.environ.get("LD_LIBRARY_PATH", "")
+        paths = [p for p in existing.split(":") if p]
+        if libs not in paths:
+            os.environ["LD_LIBRARY_PATH"] = ":".join([libs] + paths)
+    _clear_stale_profile_lock()
+
+
+def _clear_stale_profile_lock():
+    """清除 profile 残留的 SingletonLock（容器重置强杀 Chromium 会留下）。
+
+    仅当锁指向的 pid 已不存在时才清，正常运行中的浏览器不受影响。
+    """
+    import glob
+    lock = os.path.join(PROFILE, "SingletonLock")
+    if not os.path.islink(lock) and not os.path.exists(lock):
+        return
+    try:
+        target = os.readlink(lock) if os.path.islink(lock) else ""
+        # 锁格式通常是 "hostname-PID"
+        pid = None
+        for part in (target or "").split("-"):
+            if part.isdigit():
+                pid = int(part)
+                break
+        stale = pid is None or not os.path.exists(f"/proc/{pid}")
+        if stale:
+            for f in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                p = os.path.join(PROFILE, f)
+                if os.path.lexists(p):
+                    os.remove(p)
+    except OSError:
+        pass
 
 
 def load_creds():
