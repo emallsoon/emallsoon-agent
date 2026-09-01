@@ -82,13 +82,21 @@ def grab_gsc(ctx, res, issues, shots):
         g["status"] = "login_required"
         return
     g["overview_url"] = page.url[:100]
-    g["clicks_28d"] = num(body, "点击") or num(body, "Clicks")
-    g["impressions_28d"] = num(body, "展示") or num(body, "Impressions")
+    # 概览卡片真实文案："共有 N 次网页搜索点击"。注意后面紧跟日期(如 2026/8/29)，
+    # 不能用宽松的"点击后取数字"，否则会把年份当成点击数。
+    m = re.search(r"共有\s*([\d,]+)\s*次(?:网页搜索)?点击", body) or re.search(r"([\d,]+)\s+Clicks\b", body)
+    g["clicks_28d"] = m.group(1).replace(",", "") if m else None
+    m = re.search(r"共有\s*([\d,]+)\s*次展示", body) or re.search(r"([\d,]+)\s+Impressions\b", body)
+    g["impressions_28d"] = m.group(1).replace(",", "") if m else None
 
     # ---- 索引覆盖率 ----
     try:
         body = visit(f"{GSC_BASE}/index?resource_id={GSC_RID}", "index", 8000)
-        g["indexed_pages"] = num(body, "已编入索引") or num(body, "Indexed pages")
+        if "正在处理数据" in body:
+            g["index_state"] = "processing"  # 新站常态：Google 仍在处理索引数据，非异常
+        else:
+            g["index_state"] = "ready"
+            g["indexed_pages"] = num(body, "已编入索引") or num(body, "Indexed pages")
         err_m = re.search(r"(?:错误|Errors)[^\d]*(\d+)", body)
         g["index_errors"] = err_m.group(1) if err_m else None
         if g["index_errors"] and int(g["index_errors"]) > 0:
@@ -109,7 +117,8 @@ def grab_gsc(ctx, res, issues, shots):
     # ---- 手动操作 / 安全问题 ----
     try:
         body = visit(f"{GSC_BASE}/manual-actions?resource_id={GSC_RID}", "manual", 5000)
-        no_issue = bool(re.search(r"未发现|No issues|no manual", body, re.I))
+        # 页面真实文案："未检测到任何问题"（check_circle）
+        no_issue = bool(re.search(r"未检测到任何问题|未发现|No issues|no manual", body, re.I))
         g["manual_actions_clean"] = no_issue
         if not no_issue:
             issues.append("GSC: 手动操作/处罚页面未确认干净，需人工查看截图")
@@ -194,12 +203,16 @@ def main():
         grab_gsc(ctx, res, issues, shots)
         grab_bwt(ctx, res, issues, shots)
         backup_cookies(ctx)  # 顺带保鲜登录态
+    except Exception as e:
+        res["status"] = "error"
+        issues.append(f"抓取过程异常中断: {type(e).__name__} {str(e)[:80]}")
     finally:
         ctx.close()
 
-    if any("login_required" in (res["gsc"].get("status", ""), res["bwt"].get("status", ""))):
+    # 注意：这里是元组成员判断（str in tuple），不要包 any() —— any(bool) 会 TypeError
+    if "login_required" in (res["gsc"].get("status", ""), res["bwt"].get("status", "")):
         res["status"] = "login_required"
-    elif issues:
+    elif res["status"] != "error" and issues:
         res["status"] = "issue"
 
     fn = os.path.join(OUT, f"monitor-{DATE}.json")
