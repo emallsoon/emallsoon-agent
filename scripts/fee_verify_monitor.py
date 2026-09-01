@@ -22,12 +22,12 @@ import time
 
 sys.path.insert(0, "/workspace/.pylibs")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cloak_common import setup_env  # noqa: E402
+from cloak_common import setup_env, bj_now, bj_date  # noqa: E402
 
 setup_env()
 
 OUT = "/workspace/seo-monitor"
-DATE = time.strftime("%Y%m%d")
+DATE = bj_date()  # 北京时间日期（勿用 time.strftime，沙盒时区不可靠）
 UA_WIN = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
 
@@ -241,7 +241,7 @@ def main():
         return 0
 
     os.makedirs(OUT, exist_ok=True)
-    res = {"date": time.strftime("%Y-%m-%d %H:%M"), "checks": {}, "issues": [],
+    res = {"date": bj_now().strftime("%Y-%m-%d %H:%M") + " (北京时间)", "checks": {}, "issues": [],
            "webcheck_baseline": {
                "date": "2026-08-31",
                "conclusion": "首轮 WebFetch/WebSearch 人工核验：全部站点费率与官方一致（eBay 个体+店铺全表 / Amazon 类目 referral / Etsy / Shopify US Basic 2.9%+$0.30 / TikTok 6%）",
@@ -256,23 +256,27 @@ def main():
     checks = res["checks"]
 
     from cloakbrowser import launch
-    browser = launch(headless=True)
-    ctx = browser.new_context(
-        viewport={"width": 1440, "height": 900},
-        locale="en-US",
-        user_agent=UA_WIN,
-        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-    )
-    page = ctx.new_page()
     try:
-        check_amazon(page, checks)
-        check_ebay(page, checks)
-        check_etsy(page, checks)
-        check_shopify(page, checks)
-        check_tiktok(page, checks)
-    finally:
-        ctx.close()
-        browser.close()
+        browser = launch(headless=True)
+        ctx = browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            locale="en-US",
+            user_agent=UA_WIN,
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+        )
+        page = ctx.new_page()
+        try:
+            check_amazon(page, checks)
+            check_ebay(page, checks)
+            check_etsy(page, checks)
+            check_shopify(page, checks)
+            check_tiktok(page, checks)
+        finally:
+            ctx.close()
+            browser.close()
+    except Exception as e:
+        # 启动/抓取异常也必须落盘报告，否则定时任务静默蒸发、无从诊断
+        res["issues"].insert(0, f"浏览器启动/抓取异常中断: {type(e).__name__} {str(e)[:80]}")
 
     for k, v in checks.items():
         if v.get("status") == "diff":

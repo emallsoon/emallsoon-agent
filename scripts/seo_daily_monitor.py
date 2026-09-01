@@ -22,7 +22,8 @@ import time
 
 sys.path.insert(0, "/workspace/.pylibs")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cloak_common import setup_env, PROFILE, restore_cookies, backup_cookies  # noqa: E402
+from cloak_common import (setup_env, PROFILE, restore_cookies, backup_cookies,  # noqa: E402
+                          bj_now, bj_date, launch_profile_ctx)
 
 setup_env()
 
@@ -31,7 +32,7 @@ GSC_RID = "sc-domain:emallsoon.com"
 GSC_BASE = f"https://search.google.com/search-console"
 BWT_BASE = "https://www.bing.com/webmasters"
 SITE = "https://emallsoon.com"
-DATE = time.strftime("%Y%m%d")
+DATE = bj_date()  # 北京时间日期（勿用 time.strftime，沙盒时区不可靠）
 
 
 def parse_args():
@@ -167,7 +168,7 @@ def main():
 
     os.makedirs(OUT, exist_ok=True)
     res = {
-        "date": time.strftime("%Y-%m-%d %H:%M"),
+        "date": bj_now().strftime("%Y-%m-%d %H:%M") + " (北京时间)",
         "status": "ok",
         "gsc": {}, "bwt": {},
         "issues": [],
@@ -189,14 +190,13 @@ def main():
         issues.append(f"站点访问异常: {type(e).__name__} {str(e)[:80]}")
         res["site_http"] = None
 
-    from cloakbrowser import launch_persistent_context
     try:
-        ctx = launch_persistent_context(PROFILE, headless=True)
+        ctx = launch_profile_ctx()  # 带重试，防跨会话 profile 争用
     except Exception as e:
         print(f"浏览器启动失败: {e}")
         res["status"] = "error"
-        res["issues"].append(f"浏览器启动失败: {type(e).__name__}")
-        return 2
+        res["issues"].append(f"浏览器启动失败: {type(e).__name__} {str(e)[:80]}")
+        return write_report(res)  # 必须落盘报告，否则定时任务静默蒸发、无从诊断
     restore_cookies(ctx)
 
     try:
@@ -215,6 +215,11 @@ def main():
     elif res["status"] != "error" and issues:
         res["status"] = "issue"
 
+    return write_report(res)
+
+
+def write_report(res):
+    """落盘 JSON 报告并打印摘要。所有退出路径都必须经过这里（无人值守诊断的底线）。"""
     fn = os.path.join(OUT, f"monitor-{DATE}.json")
     with open(fn, "w") as f:
         json.dump(res, f, ensure_ascii=False, indent=1)
@@ -224,12 +229,16 @@ def main():
 
     print("=" * 50)
     print(f"状态: {res['status']}  站点HTTP: {res['site_http']}")
-    print(f"GSC: 登录={res['gsc'].get('logged_in')} 点击28d={res['gsc'].get('clicks_28d')} "
-          f"已索引={res['gsc'].get('indexed_pages')} sitemap_ok={res['gsc'].get('sitemap_ok')}")
-    print(f"BWT: 登录={res['bwt'].get('logged_in')}")
-    for i, msg in enumerate(issues, 1):
+    g = res.get("gsc") or {}
+    if g:
+        print(f"GSC: 登录={g.get('logged_in')} 点击28d={g.get('clicks_28d')} "
+              f"索引={g.get('index_state') or g.get('indexed_pages')} sitemap_ok={g.get('sitemap_ok')}")
+    b = res.get("bwt") or {}
+    if b:
+        print(f"BWT: 登录={b.get('logged_in')}")
+    for i, msg in enumerate(res["issues"], 1):
         print(f"  ⚠️ [{i}] {msg}")
-    if not issues:
+    if not res["issues"]:
         print("  ✅ 无异常")
     print(f"报告: {fn}")
     return 0 if res["status"] == "ok" else 1
