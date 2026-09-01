@@ -27,10 +27,49 @@ AUTH = "/workspace/.browser-auth"
 # time.strftime("%Y%m%d") 会取到错误日期 → 报告文件名串日并覆盖前日存档。
 BJ_TZ = timezone(timedelta(hours=8))
 
+_HTTP_TIME_CACHE = {"t": None, "ts": 0.0}  # 权威UTC时间 + 取得时刻（monotonic）
+
+
+def _http_utc_now(timeout=5):
+    """从权威站点 HTTP Date 头取当前 UTC 时间，失败返回 None。
+
+    背景：2026-09-01 触发会话系统时钟慢了约 24h，仅按时区换算救不了错钟；
+    HTTP Date 头来自服务器，不受沙盒时钟漂移影响。缓存 10 分钟减少请求。
+    """
+    import urllib.request
+    from email.utils import parsedate_to_datetime
+    mono = time.monotonic()
+    if _HTTP_TIME_CACHE["t"] is not None and mono - _HTTP_TIME_CACHE["ts"] < 600:
+        return _HTTP_TIME_CACHE["t"]
+    for url in ("https://www.google.com/generate_204", "https://emallsoon.com/"):
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                d = resp.headers.get("Date")
+                if d:
+                    t = parsedate_to_datetime(d).astimezone(timezone.utc)
+                    _HTTP_TIME_CACHE.update(t=t, ts=mono)
+                    return t
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def clock_skew_s():
+    """沙盒系统时钟相对权威时间的偏差（秒）。取不到权威时间返回 None。"""
+    t = _http_utc_now()
+    if t is None:
+        return None
+    sys_utc = datetime.now(timezone.utc)
+    return (sys_utc - t).total_seconds()
+
 
 def bj_now():
-    """当前北京时间 datetime。"""
-    return datetime.now(BJ_TZ)
+    """当前北京时间 datetime（优先 HTTP Date 权威时间，防沙盒时钟漂移）。"""
+    t = _http_utc_now()
+    if t is not None:
+        return t.astimezone(BJ_TZ)
+    return datetime.now(BJ_TZ)  # 网络不可用时的兜底
 
 
 def bj_date(fmt="%Y%m%d"):
@@ -176,13 +215,13 @@ def restore_cookies(ctx, force=False):
 def backup_cookies(ctx, tag="cloak"):
     """备份上下文全部 cookie（Playwright 格式），更新 latest-cloak.json 指针。"""
     cookies = ctx.cookies()
-    ts = time.strftime("%Y%m%d-%H%M%S")
+    ts = bj_date("%Y%m%d-%H%M%S")  # 权威时间，防错钟串名
     fn = os.path.join(AUTH, f"cookies-{tag}-{ts}.json")
     with open(fn, "w") as f:
         json.dump({
             "kind": "cloakbrowser-playwright",
             "engine": "cloakbrowser",
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "created_at": bj_now().strftime("%Y-%m-%dT%H:%M:%S+08:00"),
             "total": len(cookies),
             "cookies": cookies,
         }, f, ensure_ascii=False, indent=1)
